@@ -1,0 +1,4 @@
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+DrissionPage>=4.1.1.2
+pdfplumber>=0.11.4

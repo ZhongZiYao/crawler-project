@@ -1,0 +1,12 @@
+# classify.py 依赖清单
+# 用法：uv pip install -r requirements_classify.txt -r 项目内 requirements.txt
+
+# PDF 文本提取（主备两套，按顺序尝试）
+pdfplumber>=0.10.0
+pypdf>=3.17.0
+
+# Word 文档文本提取（_extract_docx_text 使用 import docx）
+python-docx>=1.1.0
+
+# 生成分类统计 Excel（write_statistics 使用 openpyxl）
+openpyxl>=3.1.2
