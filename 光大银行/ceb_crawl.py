@@ -255,8 +255,12 @@ def click_to_detail(page: ChromiumPage, title: str) -> Optional[ChromiumPage]:
     return None
 
 
-def download_pdfs_in_detail(detail_page: ChromiumPage, list_title: str, log_writer, log_file) -> int:
-    """详情页里遍历所有 a 链接, 筛"发行公告"或"产品说明书" -> click -> 拿 PDF url -> 下载"""
+def download_pdfs_in_detail(detail_page: ChromiumPage, main_page: ChromiumPage, list_title: str, log_writer, log_file) -> int:
+    """详情页里遍历所有 a 链接, 筛"发行公告"或"产品说明书" -> click -> 拿 PDF url -> 下载
+    
+    detail_page: 详情页 tab
+    main_page: 主页面对象（用于 get_tabs()）
+    """
     time.sleep(2)
     
     # 找所有 a 链接, 文字里含目标关键词
@@ -299,17 +303,17 @@ def download_pdfs_in_detail(detail_page: ChromiumPage, list_title: str, log_writ
         if href and '.pdf' in href.lower():
             pdf_url = href if href.startswith('http') else DL_BASE + href
         else:
-            # 点击链接获取 PDF URL
+            # 点击链接获取 PDF URL - 使用 main_page 获取 tabs
             try:
-                tabs_before = set(detail_page.get_tabs())
+                tabs_before = set(main_page.get_tabs())
                 link.click()
                 time.sleep(2)
                 
-                tabs_after = detail_page.get_tabs()
+                tabs_after = main_page.get_tabs()
                 new_tabs = [t for t in tabs_after if t not in tabs_before]
                 
                 if new_tabs:
-                    pdf_tab = detail_page.get_tab(new_tabs[0])
+                    pdf_tab = main_page.get_tab(new_tabs[0])
                     pdf_url = pdf_tab.url
                     try:
                         pdf_tab.close()
@@ -473,7 +477,7 @@ def main():
                     print(f'    [ERR] 详情页打开失败')
                     continue
                 
-                n = download_pdfs_in_detail(detail_page, title, writer, log_file)
+                n = download_pdfs_in_detail(detail_page, page, title, writer, log_file)
                 page_downloaded += n
                 total_downloaded += n
                 
