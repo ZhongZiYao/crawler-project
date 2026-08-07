@@ -44,7 +44,8 @@ from typing import Optional, List, Tuple
 # DrissionPage 替代 Playwright
 from DrissionPage import ChromiumPage, ChromiumOptions
 
-PROJECT_ROOT = r'E:\Program Files\PythonProject\crawler project\zzy_crawler\光大银行'
+# 动态获取项目根目录（脚本所在目录），避免硬编码到不存在的盘符
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(PROJECT_ROOT, 'download_files', '产品公告', '发行公告_产品说明书')
 LOG_PATH = os.path.join(PROJECT_ROOT, 'ceb_crawl_log.csv')
 STATE_DIR = os.path.join(PROJECT_ROOT, 'state')
