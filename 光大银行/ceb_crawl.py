@@ -63,7 +63,27 @@ END_DATE = ''              # 截止日期 (空=今天)
 
 # 浏览器配置
 HEADLESS = False
+# 把浏览器窗口"停"在屏幕外的虚拟坐标 (-32000, -32000 是 Windows 允许的最小坐标)
+# 效果: 窗口完全不可见、不抢焦点、不影响用户操作电脑, 同时保持有头模式规避反爬
+WINDOW_PARK_X = -32000
+WINDOW_PARK_Y = -32000
+WINDOW_W = 1280
+WINDOW_H = 800
 TEMP_PROFILE_DIR = None  # 运行时创建
+
+
+def park_window(page):
+    """把浏览器窗口移到屏幕外 (虚拟坐标), 防止抢占焦点干扰用户
+    
+    注意: 只对当前 page 所属的浏览器窗口生效, 新开 tab/窗口需要在新 page 上调用
+    """
+    try:
+        page.set.window.location(WINDOW_PARK_X, WINDOW_PARK_Y)
+    except Exception:
+        try:
+            page.run_js(f'window.moveTo({WINDOW_PARK_X}, {WINDOW_PARK_Y})')
+        except Exception:
+            pass
 
 
 def normalize_date(text: str) -> str:
@@ -111,10 +131,21 @@ def create_browser() -> ChromiumPage:
     
     if HEADLESS:
         co.headless()
+    else:
+        # 有头模式: 把初始窗口放到屏幕外, 避免抢占焦点
+        co.set_argument(f'--window-position={WINDOW_PARK_X},{WINDOW_PARK_Y}')
+        co.set_argument(f'--window-size={WINDOW_W},{WINDOW_H}')
     
     page = ChromiumPage(co)
+    # 启动后再次确保窗口位置 (DrissionPage 启动器有时会忽略启动参数)
+    park_window(page)
+    # 等待窗口初始化完成后再 park 一次, 防止 Chrome 启动后窗口被 Windows 拉回主屏
+    import time as _t
+    _t.sleep(1)
+    park_window(page)
     print(f'[BROWSER] DrissionPage 启动成功, profile: {TEMP_PROFILE_DIR}')
     print(f'[BROWSER] 下载目录: {os.path.abspath(OUT_DIR)}')
+    print(f'[BROWSER] 窗口已停到屏幕外 ({WINDOW_PARK_X},{WINDOW_PARK_Y}), 不影响用户操作')
     return page
 
 
@@ -248,6 +279,8 @@ def click_to_detail(page: ChromiumPage, title: str) -> Optional[ChromiumPage]:
                     
                     if new_tabs:
                         detail_tab = page.get_tab(new_tabs[0])
+                        # 新详情页 tab 也隐藏到屏幕外, 避免弹出来抢焦点
+                        park_window(detail_tab)
                         time.sleep(2)
                         return detail_tab
                     else:
