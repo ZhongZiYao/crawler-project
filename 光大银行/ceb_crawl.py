@@ -1,3 +1,14 @@
+# --- UTF-8 stdout fix (Windows GBK emoji/unicode crash) ---
+import io as _io, sys as _sys
+if _sys.platform == 'win32':
+    try:
+        _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        _sys.stdout = _io.TextIOWrapper(_sys.stdout.buffer, encoding='utf-8', errors='replace')
+        _sys.stderr = _io.TextIOWrapper(_sys.stderr.buffer, encoding='utf-8', errors='replace')
+# --- end UTF-8 fix ---
+
 """
 光大银行产品公告 PDF 下载器 — DrissionPage 版本
 
@@ -115,14 +126,33 @@ def cleanup_browser(page: ChromiumPage):
             pass
 
 
-def go_to_list_page(page: ChromiumPage, page_num: int) -> bool:
-    """翻到指定页: 使用 goPage() JS 函数"""
-    if page_num == 1:
+def go_to_list_page(page: ChromiumPage, page_num: int, need_init: bool = True) -> bool:
+    """翻到指定页: 使用 goPage() JS 函数
+    
+    need_init: 是否需要先加载首页（断点续抓时需要）
+    """
+    # 如果页面还没加载（如断点续抓），先加载首页
+    if need_init and '产品公告' not in (page.title or ''):
+        print(f'  [INIT] 先加载首页...')
         try:
             page.get(LIST_URL)
-            time.sleep(8)  # 等待反爬 JS 执行和页面加载
-            
-            # 检查页面是否加载成功
+            time.sleep(8)
+            if '产品公告' not in (page.title or ''):
+                print(f'  [ERR] 首页加载失败: {page.title}')
+                return False
+        except Exception as e:
+            print(f'  [ERR] 首页加载异常: {e}')
+            return False
+    
+    if page_num == 1:
+        # 如果已经在首页，直接返回
+        if '产品公告' in (page.title or ''):
+            print(f'  [OK] 已在首页: {page.title}')
+            return True
+        # 否则加载首页
+        try:
+            page.get(LIST_URL)
+            time.sleep(8)
             title = page.title
             if '产品公告' in title:
                 print(f'  [OK] 首页加载成功: {title}')
