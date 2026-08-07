@@ -22,13 +22,12 @@ if _sys.platform == 'win32':
   2. 遍历当前页所有 li.cpgg_li (list 页先筛: 含"发行公告"or"产品说明书"才点)
      a. 点 li 的 a.fl 标题 -> 开新 tab (详情页)
      b. 详情页里遍历所有 a 链接, 筛选"发行公告"or"产品说明书"
-     c. 对每个符合条件的 a: click -> 开 PDF tab -> 拿 url -> requests 下载
-     d. 关 PDF tab
-     e. 详情页所有都下完 -> 关详情页
+     c. 对每个符合条件的 a: click -> 浏览器原生下载 -> 关 PDF tab -> 回详情页点下一个
+     d. 详情页所有都下完 -> 关详情页
   3. 翻下一页 (使用 goPage() JS 函数)
   4. 直到没有下一页或达到最大页数
 
-下载: requests.get(url)
+下载: 浏览器原生下载 (不用 requests)
 存储: <date>_<safe_title>.pdf
 进度: state/ceb_progress.json 存 last_completed_page (断点续抓)
 日志: ceb_crawl_log.csv
@@ -40,7 +39,6 @@ import json
 import time
 import tempfile
 import shutil
-import requests
 from typing import Optional, List, Tuple
 
 # DrissionPage 替代 Playwright
@@ -92,7 +90,7 @@ def safe_filename(name: str, max_len: int = 100) -> str:
 
 
 def create_browser() -> ChromiumPage:
-    """创建 DrissionPage 浏览器实例"""
+    """创建 DrissionPage 浏览器实例，配置自动下载 PDF"""
     global TEMP_PROFILE_DIR
     
     # 使用临时 profile 避免与已打开的 Chrome 冲突
@@ -104,11 +102,18 @@ def create_browser() -> ChromiumPage:
     co.set_argument('--no-first-run')
     co.set_argument('--no-default-browser-check')
     
+    # 配置自动下载 PDF（禁用内置 PDF 查看器，直接下载）
+    os.makedirs(OUT_DIR, exist_ok=True)
+    co.set_pref('plugins.always_open_pdf_externally', True)
+    co.set_pref('download.default_directory', os.path.abspath(OUT_DIR))
+    co.set_pref('download.prompt_for_download', False)
+    
     if HEADLESS:
         co.headless()
     
     page = ChromiumPage(co)
     print(f'[BROWSER] DrissionPage 启动成功, profile: {TEMP_PROFILE_DIR}')
+    print(f'[BROWSER] 下载目录: {os.path.abspath(OUT_DIR)}')
     return page
 
 
@@ -255,16 +260,54 @@ def click_to_detail(page: ChromiumPage, title: str) -> Optional[ChromiumPage]:
     return None
 
 
-def download_pdfs_in_detail(detail_page: ChromiumPage, main_page: ChromiumPage, list_title: str, log_writer, log_file) -> int:
-    """详情页里遍历所有 a 链接, 筛"发行公告"或"产品说明书" -> click -> 拿 PDF url -> 下载
+def _wait_download_finish(timeout: int = 30, files_before: set = None) -> bool:
+    """等待浏览器下载完成
     
-    detail_page: 详情页 tab
-    main_page: 主页面对象（用于 get_tabs()）
+    三种完成信号:
+      1. .crdownload 文件出现后消失（正常下载流程）
+      2. 新 PDF 文件出现且无 .crdownload（下载太快没看到临时文件）
+      3. 超时返回 False
+    """
+    t0 = time.time()
+    saw_crdownload = False
+    while time.time() - t0 < timeout:
+        try:
+            current_files = set(os.listdir(OUT_DIR))
+        except:
+            current_files = set()
+
+        crdownloads = [f for f in current_files if f.endswith('.crdownload')]
+
+        # 检查是否出现了新 PDF 且无 .crdownload（下载已完成）
+        if files_before is not None and not crdownloads:
+            new_pdfs = [f for f in (current_files - files_before) if f.endswith('.pdf')]
+            if new_pdfs:
+                return True
+
+        if crdownloads:
+            saw_crdownload = True
+        elif saw_crdownload:
+            # 之前有 .crdownload，现在消失了 → 下载完成
+            time.sleep(0.5)
+            return True
+
+        time.sleep(0.5)
+
+    return False
+
+
+def download_pdfs_in_detail(detail_page, main_page, list_title: str, log_writer, log_file) -> int:
+    """详情页里逐个点击链接 → 浏览器原生下载 → 关闭 tab → 回详情页点下一个
+
+    修复:
+      - 用 tab.id 做比较（对象比较不可靠）
+      - 处理 PDF 在当前 tab 打开的情况（导航走了要恢复）
+      - 每次点击前确保 detail_page 在详情页
     """
     time.sleep(2)
-    
-    # 找所有 a 链接, 文字里含目标关键词
-    found = []
+
+    # 第一步：只收集目标链接的文本（不保存元素引用）
+    target_titles = []
     try:
         links = detail_page.eles('tag:a')
         for link in links:
@@ -273,124 +316,159 @@ def download_pdfs_in_detail(detail_page: ChromiumPage, main_page: ChromiumPage, 
                 if not text or len(text) < 5 or len(text) > 200:
                     continue
                 if any(kw in text for kw in TARGET_KEYWORDS):
-                    href = link.attr('href') or ''
-                    found.append((text, link, href))
+                    target_titles.append(text)
             except:
                 continue
     except Exception as e:
         print(f'    [ERR] 详情页找 a 失败: {str(e)[:60]}')
         return 0
-    
-    if not found:
+
+    if not target_titles:
         return 0
-    
+
     # 去重
-    seen = set()
-    unique_found = []
-    for text, link, href in found:
-        if text not in seen:
-            seen.add(text)
-            unique_found.append((text, link, href))
-    found = unique_found
-    
-    print(f'    [DETAIL] {len(found)} 个待下载')
-    
+    target_titles = list(dict.fromkeys(target_titles))
+    print(f'    [DETAIL] {len(target_titles)} 个待下载')
+
     downloaded = 0
-    for sub_title, link, href in found:
-        pdf_url = None
-        
-        # 尝试直接获取 href
-        if href and '.pdf' in href.lower():
-            pdf_url = href if href.startswith('http') else DL_BASE + href
-        else:
-            # 点击链接获取 PDF URL - 使用 main_page 获取 tabs
+    detail_url = detail_page.url  # 记住详情页 URL，用于恢复
+
+    for idx, sub_title in enumerate(target_titles):
+        today = time.strftime('%Y-%m-%d')
+        fn = f"{today}_{safe_filename(sub_title)}.pdf"
+        out_path = os.path.join(OUT_DIR, fn)
+
+        # 跳过已存在
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 1024:
+            print(f'      [{idx+1}/{len(target_titles)}] [SKIP] 已存在: {fn[:50]}')
+            log_writer.writerow({
+                'row_id': '', 'title': sub_title, 'date': today,
+                'pdf_url': '', 'status': 'skipped_exists',
+                'local_path': out_path, 'size': os.path.getsize(out_path),
+                'list_title': list_title,
+            })
+            log_file.flush()
+            downloaded += 1
+            continue
+
+        print(f'      [{idx+1}/{len(target_titles)}] 点击: {sub_title[:50]}...')
+
+        # 确保当前在详情页
+        try:
+            if detail_page.url != detail_url:
+                print(f'      [RESTORE] 当前不在详情页, 重新加载...')
+                detail_page.get(detail_url)
+                time.sleep(3)
+        except:
             try:
-                tabs_before = set(main_page.get_tabs())
-                link.click()
-                time.sleep(2)
-                
-                tabs_after = main_page.get_tabs()
-                new_tabs = [t for t in tabs_after if t not in tabs_before]
-                
-                if new_tabs:
-                    pdf_tab = main_page.get_tab(new_tabs[0])
-                    pdf_url = pdf_tab.url
-                    try:
-                        pdf_tab.close()
-                    except:
-                        pass
-                else:
-                    # 可能是在当前页导航
-                    time.sleep(1)
-                    if '.pdf' in detail_page.url.lower():
-                        pdf_url = detail_page.url
-                        detail_page.get(detail_page.url)  # 重置
-            except Exception as e:
-                print(f'      [ERR] 点击失败: {str(e)[:60]}')
+                detail_page.get(detail_url)
+                time.sleep(3)
+            except:
+                pass
+
+        # 记录点击前的文件列表和 tab ID
+        files_before = set(os.listdir(OUT_DIR))
+        try:
+            tabs_before_ids = set(t.id for t in main_page.get_tabs())
+        except:
+            tabs_before_ids = set()
+
+        try:
+            # 重新查找元素（避免 stale element）
+            target_link = None
+            links = detail_page.eles('tag:a')
+            for link in links:
+                try:
+                    text = link.text.strip()
+                    if text == sub_title:
+                        target_link = link
+                        break
+                except:
+                    continue
+
+            if not target_link:
+                print(f'      [WARN] 未找到链接: {sub_title[:40]}')
                 continue
-        
-        if pdf_url and '.pdf' in pdf_url.lower():
-            if download_one(pdf_url, sub_title, log_writer, log_file, list_title):
+
+            # 点击链接
+            target_link.click()
+            time.sleep(2)
+
+            # 检测新打开的 tab
+            try:
+                tabs_after = main_page.get_tabs()
+                tabs_after_ids = set(t.id for t in tabs_after)
+            except:
+                tabs_after_ids = set()
+
+            new_tab_ids = tabs_after_ids - tabs_before_ids
+
+            # 等待下载完成（传入 files_before 检测新 PDF 文件出现）
+            _wait_download_finish(timeout=30, files_before=files_before)
+
+            # 下载完了，关闭新打开的 tab
+            for tab_id in new_tab_ids:
+                try:
+                    tab_obj = main_page.get_tab(tab_id)
+                    if tab_obj:
+                        tab_obj.close()
+                except:
+                    pass
+
+            # 如果 detail_page 导航走了（PDF 在当前 tab 打开），恢复回详情页
+            if detail_page.url != detail_url:
+                print(f'      [INFO] 当前 tab 导航到了: {detail_page.url[:60]}')
+                detail_page.get(detail_url)
+                time.sleep(3)
+
+            # 检查是否下载成功
+            files_after = set(os.listdir(OUT_DIR))
+            new_files = files_after - files_before
+            pdf_files = [f for f in new_files if f.endswith('.pdf')]
+
+            if pdf_files:
+                # 重命名为目标文件名
+                downloaded_file = pdf_files[0]
+                src_path = os.path.join(OUT_DIR, downloaded_file)
+                if src_path != out_path:
+                    try:
+                        if os.path.exists(out_path):
+                            os.remove(out_path)
+                        os.rename(src_path, out_path)
+                    except:
+                        out_path = src_path
+
+                file_size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
+                print(f'      [OK] {fn[:50]} ({file_size} bytes)')
+                log_writer.writerow({
+                    'row_id': '', 'title': sub_title, 'date': today,
+                    'pdf_url': '', 'status': 'downloaded',
+                    'local_path': out_path, 'size': file_size,
+                    'list_title': list_title,
+                })
+                log_file.flush()
                 downloaded += 1
-    
+            else:
+                print(f'      [FAIL] 未检测到下载: {sub_title[:40]}')
+                log_writer.writerow({
+                    'row_id': '', 'title': sub_title, 'date': today,
+                    'pdf_url': '', 'status': 'no_download',
+                    'local_path': '', 'size': 0,
+                    'list_title': list_title,
+                })
+                log_file.flush()
+
+        except Exception as e:
+            print(f'      [ERR] 点击失败: {str(e)[:80]}')
+            # 尝试恢复详情页
+            try:
+                detail_page.get(detail_url)
+                time.sleep(2)
+            except:
+                pass
+            continue
+
     return downloaded
-
-
-def download_one(pdf_url: str, sub_title: str, log_writer, log_file, list_title: str) -> bool:
-    """下载一个 PDF + 写日志"""
-    today = time.strftime('%Y-%m-%d')
-    fn = f"{today}_{safe_filename(sub_title)}.pdf"
-    out_path = os.path.join(OUT_DIR, fn)
-    
-    if os.path.exists(out_path) and os.path.getsize(out_path) > 1024:
-        print(f'      [SKIP] 已存在: {fn}')
-        log_writer.writerow({
-            'row_id': '', 'title': sub_title, 'date': today,
-            'pdf_url': pdf_url, 'status': 'skipped_exists',
-            'local_path': out_path, 'size': os.path.getsize(out_path),
-            'list_title': list_title,
-        })
-        log_file.flush()
-        return True
-    
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': LIST_URL,
-        }
-        r = requests.get(pdf_url, headers=headers, timeout=60)
-        if r.status_code == 200 and r.content[:4] == b'%PDF':
-            with open(out_path, 'wb') as f:
-                f.write(r.content)
-            print(f'      [OK] {fn} ({len(r.content)} bytes)')
-            log_writer.writerow({
-                'row_id': '', 'title': sub_title, 'date': today,
-                'pdf_url': pdf_url, 'status': 'downloaded',
-                'local_path': out_path, 'size': len(r.content),
-                'list_title': list_title,
-            })
-            log_file.flush()
-            return True
-        else:
-            print(f'      [FAIL] {r.status_code} or not PDF')
-            log_writer.writerow({
-                'row_id': '', 'title': sub_title, 'date': today,
-                'pdf_url': pdf_url, 'status': f'fail: {r.status_code}',
-                'local_path': '', 'size': 0,
-                'list_title': list_title,
-            })
-            log_file.flush()
-            return False
-    except Exception as e:
-        print(f'      [ERR] requests: {str(e)[:60]}')
-        log_writer.writerow({
-            'row_id': '', 'title': sub_title, 'date': today,
-            'pdf_url': pdf_url, 'status': f'fail: {str(e)[:60]}',
-            'local_path': '', 'size': 0,
-            'list_title': list_title,
-        })
-        log_file.flush()
-        return False
 
 
 def main():
