@@ -68,3 +68,79 @@ $env:ENABLE_TUNNEL_PROXY = '0'
 文件：
 - requirements.txt: 已包含 `playwright==1.59.0`（用于安装 Playwright Python 包）
 - 额外的浏览器二进制仍需运行 `python -m playwright install` 获取
+
+---
+
+## 健康检查调度（推荐生产配置）
+
+三层结构：
+
+```
+健康检查 health_check.ps1  (每 2h 被计划任务触发)
+        ↓ 网站正常时启动
+   批次守护 run_batch.ps1   (死循环, 每 5min 启动一次 main.py)
+        ↓ 调用
+     爬虫本体 main.py        (每批爬 20 个产品就主动退出)
+```
+
+### 紧急刹车机制
+
+`main.py` 在以下情况会**主动 `sys.exit(10)`**：
+- 连续 `MAX_CONSECUTIVE_DOWNLOAD_FAILS`（默认 5）个产品没有成功下载任何 PDF → 判定被风控
+- 检测到 `state\emergency_stop.flag` 文件存在 → 立即停
+
+`run_batch.ps1` 收到 exit=10/11 后会：
+1. 创建 `state\emergency_stop.flag` 标记
+2. 主动 `exit` 自己 → 整个守护链停掉
+
+`health_check.ps1` 收到此信号后：
+- 杀掉所有 python / powershell 爬虫进程
+- 等待下一次计划任务触发（默认 2 小时后）
+
+### 一键注册 Windows 计划任务（开机自启 + 每 2h 检测）
+
+用**管理员 PowerShell** 跑一次即可：
+
+```powershell
+cd D:\crawler-project\光大银行
+powershell -ExecutionPolicy Bypass -File .\register_health_task.ps1
+```
+
+注册成功后：
+- ✅ 电脑开机后自动启动健康检查
+- ✅ 每 2 小时检查一次 `https://www.cebwm.com` 连通性
+- ✅ 网站正常 → 自动启动 `run_batch.ps1` 继续爬
+- ✅ 网站异常 → 杀掉一切，等下个 2h 周期再试
+
+### 管理命令
+
+```powershell
+# 手动触发一次健康检查
+schtasks /Run /TN CebwmHealthCheck
+
+# 查看任务状态
+schtasks /Query /TN CebwmHealthCheck /V /FO LIST
+
+# 取消注册（停用调度器）
+schtasks /Delete /TN CebwmHealthCheck /F
+
+# 实时查看健康检查日志
+Get-Content D:\crawler-project\光大银行\state\health_check.log -Tail 50 -Wait
+
+# 实时查看爬虫日志
+Get-Content D:\crawler-project\光大银行\state\光大理财_日志记录.csv -Tail 20 -Wait
+
+# 手动清理紧急停止标记 (网站恢复后强制重启)
+Remove-Item D:\crawler-project\光大银行\state\emergency_stop.flag
+```
+
+### 调参 (环境变量)
+
+| 变量 | 默认值 | 作用 |
+|------|--------|------|
+| `BATCH_MAX_SUCCESS_PRODUCTS` | 20 | 每批爬多少产品就退出 |
+| `SLEEP_MINUTES` | 5 | run_batch 退出后等多少分钟再跑 |
+| `MAX_CONSECUTIVE_DOWNLOAD_FAILS` | 5 | 连续多少产品无下载就紧急刹车 |
+| `ENABLE_TUNNEL_PROXY` | true | 是否启用隧道代理 |
+
+修改 `register_health_task.ps1` 里的 `PT2H` 可以改检查间隔（PT30M = 30 分钟，PT1H = 1 小时）。

@@ -38,6 +38,39 @@ from playwright.sync_api import Page, sync_playwright
 # 机构名称（与台账统一）
 INSTITUTE_NAME = "光大理财"
 
+# ============================================================
+# 紧急退出信号 (供 health_check.ps1 感知)
+# ============================================================
+# 退出码约定:
+#   0 = 正常 (达到批次上限 / 自然结束)
+#   10 = 网站被风控 (连续大量下载失败, 需要停止所有爬虫)
+#   11 = 网络/DNS 异常
+import atexit
+import sys as _exit_sys
+
+EXIT_CODE_BLOCKED = 10
+EXIT_CODE_NETWORK = 11
+
+# 紧急刹车文件: health_check.ps1 创建此文件, main.py 每爬一个产品检查一次
+# (注意: 路径在 STATE_DIR 定义后再赋值, 见下方 _init_emergency_paths)
+EMERGENCY_STOP_FILE = ""
+
+
+def emergency_exit(reason: str, exit_code: int):
+    """紧急退出, 写入状态文件供 health_check.ps1 后续观察"""
+    try:
+        flag = {
+            "timestamp": now_time_str(),
+            "exit_code": exit_code,
+            "reason": reason,
+        }
+        with open(os.path.join(STATE_DIR, "emergency_exit.json"), "w", encoding="utf-8") as f:
+            json.dump(flag, f, ensure_ascii=False, indent=2)
+        print(f"\n🚨 [EMERGENCY] 紧急退出: {reason} (exit={exit_code})")
+    except Exception:
+        pass
+    _exit_sys.exit(exit_code)
+
 SITE_ROOT = "https://www.cebwm.com"
 HOME_URL = SITE_ROOT
 
@@ -49,6 +82,10 @@ LOG_CSV_PATH = os.path.join(STATE_DIR, f"{INSTITUTE_NAME}_日志记录.csv")
 PROGRESS_FILE = os.path.join(STATE_DIR, "downloaded.txt")
 CHECKPOINT_FILE = os.path.join(STATE_DIR, "checkpoint.json")
 FAILED_FILE = os.path.join(STATE_DIR, "failed_records.csv")
+
+# 紧急刹车文件路径 (STATE_DIR 已定义后再赋值)
+EMERGENCY_STOP_FILE = os.path.join(STATE_DIR, "emergency_stop.flag")
+EMERGENCY_EXIT_FILE = os.path.join(STATE_DIR, "emergency_exit.json")
 
 # 目标配置
 TARGETS: List[Tuple[str, str, int, Optional[int]]] = [
@@ -68,6 +105,9 @@ PLAYWRIGHT_BROWSER_CANDIDATES = os.getenv("PLAYWRIGHT_BROWSER_CANDIDATES", "msed
 SESSION_RECYCLE_EVERY_PRODUCTS = int(os.getenv("SESSION_RECYCLE_EVERY_PRODUCTS", "8").strip() or "8")
 # 连续失败达到阈值时，立即触发会话重建
 MAX_CONSECUTIVE_PRODUCT_FAILS = int(os.getenv("MAX_CONSECUTIVE_PRODUCT_FAILS", "3").strip() or "3")
+# 连续下载失败达到阈值时, 直接紧急退出 (通知 health_check.ps1 停止一切爬虫)
+# 阈值: 累计连续 N 个产品都没有成功下载任何 PDF 就触发
+MAX_CONSECUTIVE_DOWNLOAD_FAILS = int(os.getenv("MAX_CONSECUTIVE_DOWNLOAD_FAILS", "5").strip() or "5")
 # 会话轮换后冷却秒数
 COOLDOWN_AFTER_RECYCLE_SECONDS = float(os.getenv("COOLDOWN_AFTER_RECYCLE_SECONDS", "4").strip() or "4")
 # 单产品失败后，是否立即触发一次会话重建并重试当前产品
@@ -78,6 +118,18 @@ MAX_EMPTY_PRODUCT_PAGE_RETRIES = int(os.getenv("MAX_EMPTY_PRODUCT_PAGE_RETRIES",
 DETAIL_PAGE_READY_WAIT_SECONDS = float(os.getenv("DETAIL_PAGE_READY_WAIT_SECONDS", "8").strip() or "8")
 # 批次模式：单次运行成功处理多少个产品后主动退出
 BATCH_MAX_SUCCESS_PRODUCTS = int(os.getenv("BATCH_MAX_SUCCESS_PRODUCTS", "30000").strip() or "30000")
+# 分工模式: 多人协作时, 只爬取列表总页数的前 N 份 (0~1 之间的小数)
+#   1.0 = 全部 (默认)
+#   0.5 = 前一半 (与同事各爬一半)
+#   0.33 = 前 1/3
+# 通过环境变量 PAGE_SHARE 覆盖, 例如 PAGE_SHARE=0.5
+PAGE_SHARE = float(os.getenv("PAGE_SHARE", "1.0").strip() or "1.0")
+# 协作时自己的"份额序号" (1-based), 用于按顺序切分
+# 例: WORKER_INDEX=1,WORKER_TOTAL=2 -> 爬第 1 份
+#     WORKER_INDEX=2,WORKER_TOTAL=2 -> 爬第 2 份
+# 与 PAGE_SHARE 二选一: 设了 WORKER_TOTAL 就用等分模式
+WORKER_INDEX = int(os.getenv("WORKER_INDEX", "0").strip() or "0")
+WORKER_TOTAL = int(os.getenv("WORKER_TOTAL", "0").strip() or "0")
 # 达到批次上限后是否直接退出进程；否则只冷却后继续下一批
 BATCH_EXIT_AFTER_LIMIT = os.getenv("BATCH_EXIT_AFTER_LIMIT", "1").strip().lower() in ("1", "true", "yes", "on")
 # 批次结束后的冷却时间（秒）
@@ -121,7 +173,16 @@ except Exception:
 # END_DATE   = "2026-06-30"
 
 # 文件名关键词过滤（仅下载命中关键词的公告文件）
-NOTICE_FILE_KEYWORDS: List[str] = ["费", "费率", "份额"]
+# 设计思路: 覆盖"费率/份额/业绩比较基准"三大类公告 + 相关调整/新设场景
+# 注意: 每个关键词独立判断 (OR 关系), 文件名包含任一即下载
+NOTICE_FILE_KEYWORDS: List[str] = [
+    # --- 费率相关 ---
+    "费", "费率", 
+    # --- 份额相关 ---
+    "份额", "新设份额", "份额调整", 
+    # --- 业绩比较基准 ---
+    "业绩比较基准", "业绩基准", "比较基准", "基准调整", "业绩比较基准调整"
+]
 
 # ============================================================
 # 环境变量辅助函数
@@ -856,10 +917,10 @@ class CebwmCrawler:
                 if candidate in ("msedge", "chrome"):
                     browser_type = self.playwright.chromium
                     launch_kwargs["channel"] = candidate
-                    launch_kwargs["args"] = ["--disable-blink-features=AutomationControlled", "--window-position=-2000,0"]
+                    launch_kwargs["args"] = ["--disable-blink-features=AutomationControlled", "--window-position=-32000,-32000"]
                 elif candidate == "chromium":
                     browser_type = self.playwright.chromium
-                    launch_kwargs["args"] = ["--disable-blink-features=AutomationControlled", "--window-position=-2000,0"]
+                    launch_kwargs["args"] = ["--disable-blink-features=AutomationControlled", "--window-position=-32000,-32000"]
                 else:
                     continue
 
@@ -925,7 +986,7 @@ class CebwmCrawler:
             try:
                 self.init_browser(start_index=next_idx)
                 self.browser.goto(target_url)
-                self.browser.wait_for_load_state("networkidle", timeout=60000)
+                self.browser.wait_for_load_state("domcontentloaded", timeout=60000)
                 time.sleep(2.5)
                 if self.wait_products_ready():
                     print(f"[BROWSER] 自动切换成功，当前使用: {self.browser_name}")
@@ -934,6 +995,8 @@ class CebwmCrawler:
             except Exception as e:
                 print(f"[BROWSER] 切换尝试失败: {e}")
 
+        # 所有浏览器都失败, 返回 False 让调用方继续
+        print("[BROWSER] 所有候选浏览器均无法加载列表")
         return False
 
     def recycle_browser_session(self, target_url: str, page_num: int, reason: str = "") -> bool:
@@ -952,7 +1015,7 @@ class CebwmCrawler:
 
             self.init_browser(start_index=next_idx)
             self.browser.goto(target_url)
-            self.browser.wait_for_load_state("networkidle", timeout=60000)
+            self.browser.wait_for_load_state("domcontentloaded", timeout=60000)
             time.sleep(2.5)
 
             if not self.wait_products_ready():
@@ -1395,6 +1458,99 @@ class CebwmCrawler:
             print(f"[DEBUG] click_notice_file 异常: {str(e)}")
             return None, ""
 
+    def get_product_list_total_pages(self) -> int:
+        """获取产品列表的总页数 (用于分工爬取前 N 份)
+        
+        光大银行信息披露页的实际分页元素:
+          - #totalpage1    <span id="totalpage1">532</span>
+          - .pageInfo     "1 / 5"
+          - 文本 "/ 共 N 页" 或 "共 N 页"
+          - JS 全局变量 totalPage / pageCount
+        """
+        if not self.browser:
+            return 0
+        # 方式 1: #totalpage1 元素 (光大银行实际使用的 ID)
+        try:
+            el = self.browser.locator("#totalpage1").first
+            if el and el.is_visible():
+                txt = (el.inner_text() or "").strip()
+                if txt.isdigit():
+                    return int(txt)
+        except Exception:
+            pass
+
+        # 方式 2: #totalpage 元素 (与公告列表一致)
+        try:
+            el = self.browser.locator("#totalpage").first
+            if el and el.is_visible():
+                txt = (el.inner_text() or "").strip()
+                if txt.isdigit():
+                    return int(txt)
+        except Exception:
+            pass
+
+        # 方式 3: .pageInfo "1 / 5"
+        try:
+            el = self.browser.locator(".pageInfo").first
+            if el and el.is_visible():
+                txt = (el.inner_text() or "").strip()
+                m = re.search(r"/\s*(\d+)", txt)
+                if m:
+                    return int(m.group(1))
+        except Exception:
+            pass
+
+        # 方式 4: JS 直接读全局变量 (部分网站有 totalPage / pageCount)
+        try:
+            for var_name in ["totalPage", "pageCount", "totalpage", "TOTAL_PAGE"]:
+                val = self.browser.evaluate(f"typeof {var_name} !== 'undefined' ? {var_name} : null")
+                if isinstance(val, (int, float)) and val > 0:
+                    return int(val)
+        except Exception:
+            pass
+
+        # 方式 5: 通过 HTML 文本搜 "共 N 页"
+        try:
+            html = (self.browser.content() or "")
+            m = re.search(r"共\s*(\d+)\s*页", html)
+            if m:
+                return int(m.group(1))
+            m = re.search(r"total\s*page[s]?\s*[:：]\s*(\d+)", html, re.I)
+            if m:
+                return int(m.group(1))
+        except Exception:
+            pass
+
+        print(f"  [WARN] 无法自动获取产品列表总页数, 返回 0 (视为不分页)")
+        return 0
+
+    def compute_page_range(self, total_pages: int) -> Tuple[int, int]:
+        """根据 PAGE_SHARE / WORKER_INDEX 计算 [start_page, end_page] 闭区间
+        
+        分工模式 (WORKER_TOTAL > 0):
+          WORKER_INDEX=1, WORKER_TOTAL=2, total=10 -> (1, 5)
+          WORKER_INDEX=2, WORKER_TOTAL=2, total=10 -> (6, 10)
+        比例模式 (PAGE_SHARE < 1):
+          PAGE_SHARE=0.5, total=10 -> (1, 5)
+        """
+        if total_pages <= 1:
+            return (1, max(1, total_pages))
+
+        if WORKER_TOTAL > 1 and 1 <= WORKER_INDEX <= WORKER_TOTAL:
+            # 等分模式
+            chunk = (total_pages + WORKER_TOTAL - 1) // WORKER_TOTAL  # 向上取整
+            start = (WORKER_INDEX - 1) * chunk + 1
+            end = min(WORKER_INDEX * chunk, total_pages)
+            print(f"  [SPLIT] 等分模式: worker {WORKER_INDEX}/{WORKER_TOTAL}, chunk={chunk}")
+            return (start, end)
+
+        if 0 < PAGE_SHARE < 1.0:
+            end = max(1, int(total_pages * PAGE_SHARE))
+            print(f"  [SPLIT] 比例模式: PAGE_SHARE={PAGE_SHARE}, end={end}/{total_pages}")
+            return (1, end)
+
+        return (1, total_pages)
+
     def goto_product_page(self, page_num: int) -> bool:
         try:
             ret = self.browser.evaluate(
@@ -1493,7 +1649,7 @@ class CebwmCrawler:
                     continue
 
                 self.browser.goto(target_url)
-                self.browser.wait_for_load_state("networkidle", timeout=60000)
+                self.browser.wait_for_load_state("domcontentloaded", timeout=60000)
                 time.sleep(3.0)
                 print(f"[DEBUG] 页面加载完成，标题: {self.browser.title()}，浏览器: {self.browser_name}")
 
@@ -1503,7 +1659,23 @@ class CebwmCrawler:
                         print("⚠️ 所有候选浏览器均无法加载列表，跳过该目标")
                         continue
 
-                page_num = max(1, int(resume_page))
+                # ============ 分工爬取: 计算本任务负责的页区间 ============
+                total_pages = self.get_product_list_total_pages()
+                share_start, share_end = self.compute_page_range(total_pages)
+                print(f"\n📊 [PAGE_RANGE] 产品列表总页数: {total_pages}, 本任务负责: 第 {share_start} ~ {share_end} 页")
+                if total_pages > 0 and share_start > 1:
+                    # 跳到分工起点
+                    if not self.goto_product_page(share_start):
+                        print(f"⚠️ 跳到分工起点第 {share_start} 页失败, 回退到第 1 页")
+                        share_start = 1
+                        share_end = self.compute_page_range(0)[1] if False else total_pages  # 重新计算
+                        share_start, share_end = self.compute_page_range(total_pages)
+                # 如果 checkpoint 的 resume_page > share_end, 说明上一次已经爬完了
+                if resume_page > share_end:
+                    print(f"⏭️ [SKIP] 目标 {target_name} 分工区间[{share_start},{share_end}] 之前已爬完 (resume={resume_page}), 跳过")
+                    continue
+
+                page_num = max(share_start, int(resume_page))
                 global_idx = 0
                 current_row_idx = int(resume_row)
                 last_success_page = page_num
@@ -1511,6 +1683,7 @@ class CebwmCrawler:
                 empty_products_retry = 0
                 processed_since_recycle = 0
                 consecutive_product_fails = 0
+                consecutive_download_fails = 0  # 连续无下载成功的产品数 (用于检测被封)
                 abort_target = False
 
                 while True:
@@ -1697,6 +1870,7 @@ class CebwmCrawler:
                         notice_page_num = 1
                         notice_total_pages = self.get_notice_total_pages(notice_tab)
                         print(f"  [NOTICE] 公告分页: 共 {notice_total_pages} 页")
+                        product_download_success = False  # 本产品是否成功下载了至少一个 PDF
                         
                         while notice_page_num <= notice_total_pages:
                             notice_items = self.get_notice_items(notice_tab)
@@ -1893,6 +2067,7 @@ class CebwmCrawler:
                                         status = "SUCCEED"
                                         save_downloaded_link(pdf_url)
                                         self.downloaded_links.add(pdf_url)
+                                        product_download_success = True
                                         print(f"    [RESULT] {status}: {os.path.abspath(save_path)} ({file_size}字节)")
                                     else:
                                         status = result
@@ -1979,6 +2154,59 @@ class CebwmCrawler:
                         last_success_row = p.row_index
                         update_section_checkpoint(self.checkpoint, target_name, last_success_page, last_success_row, False)
                         consecutive_product_fails = 0
+
+                        # 紧急刹车 1: health_check 判定网站被风控 (有明确的 exit_reason 文件)
+                        # 注意: 仅当 emergency_exit.json 存在, reason 是"被封", 且是 10 分钟内的才停止
+                        if os.path.exists(EMERGENCY_STOP_FILE):
+                            try:
+                                with open(EMERGENCY_EXIT_FILE, 'r', encoding='utf-8') as _f:
+                                    _e = json.load(_f)
+                                _reason = str(_e.get('reason', '')).lower()
+                                # 时间判断: 只相信最近 10 分钟内的 reason, 旧的忽略
+                                _ts = str(_e.get('timestamp', ''))
+                                _is_recent = False
+                                try:
+                                    from datetime import datetime as _dt
+                                    _exit_time = _dt.strptime(_ts, '%Y-%m-%d %H:%M:%S')
+                                    _delta_min = (_dt.now() - _exit_time).total_seconds() / 60
+                                    _is_recent = _delta_min < 10
+                                except Exception:
+                                    _is_recent = True  # 时间解析失败, 默认信任
+
+                                _blocked_keywords = ['forbidden', 'access denied', 'too many', 'rate limit', 'captcha', '访问过于频繁']
+                                _is_blocked = any(kw in _reason for kw in _blocked_keywords)
+                                if _is_blocked and _is_recent:
+                                    print(f"\n🚨 [EMERGENCY] health_check 判定网站被封 (reason: {_e.get('reason')}, {int(_delta_min)}分钟前), 中止爬虫")
+                                    self.close()
+                                    emergency_exit(f"health_check blocked: {_e.get('reason')}", EXIT_CODE_BLOCKED)
+                                else:
+                                    # 旧 reason (超过 10 分钟) 或 reason 不是被封, 忽略并清理标记
+                                    if not _is_recent:
+                                        print(f"   ⚠️ [INFO] emergency_exit.json 已过期 ({int(_delta_min)}分钟前), 忽略并清理")
+                                    else:
+                                        print(f"   ⚠️ [INFO] emergency_stop.flag 残留但 reason='{_e.get('reason')}' 不是被封, 忽略")
+                                    try:
+                                        os.remove(EMERGENCY_STOP_FILE)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                # 解析失败, 忽略并清理
+                                try:
+                                    os.remove(EMERGENCY_STOP_FILE)
+                                except Exception:
+                                    pass
+
+                        # 紧急刹车 2: 真正被风控的表现 = 详情页加载失败, 而不是"没有文件"
+                        # product_download_success=False 只代表"日期/关键词未命中", 不算风控
+                        if consecutive_product_fails >= MAX_CONSECUTIVE_PRODUCT_FAILS * 3:
+                            # 连续很多个产品详情页都打不开 → 真的被封了
+                            print(f"\n🚨 [EMERGENCY] 连续 {consecutive_product_fails} 个产品详情页打不开, 判定被风控")
+                            self.close()
+                            emergency_exit(
+                                f"forbidden: consecutive_product_fails={consecutive_product_fails}",
+                                EXIT_CODE_BLOCKED,
+                            )
+
                         processed_since_recycle += 1
                         batch_success_count += 1
 
@@ -1997,6 +2225,13 @@ class CebwmCrawler:
                         break
 
                     if end_idx not in (None, 0) and global_idx >= int(end_idx):
+                        break
+
+                    # ============ 分工爬取: 超出本任务负责页区间时停止 ============
+                    if page_num >= share_end:
+                        print(f"\n✅ [DONE] 已爬完分工区间第 {share_start}~{share_end} 页 (总 {total_pages} 页), 本任务结束")
+                        update_section_checkpoint(self.checkpoint, target_name, share_end, 0, done=True)
+                        abort_target = True
                         break
 
                     page_num += 1
