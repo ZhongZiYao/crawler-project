@@ -1,4 +1,4 @@
-
+﻿
 # --- UTF-8 stdout fix (Windows GBK emoji crash) ---
 import io as _io, sys as _sys
 if _sys.platform == 'win32':
@@ -24,7 +24,7 @@ import socketserver
 import threading
 import select
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
@@ -70,6 +70,98 @@ def emergency_exit(reason: str, exit_code: int):
     except Exception:
         pass
     _exit_sys.exit(exit_code)
+
+
+def schedule_6h_retry():
+    """风控时自动注册 6 小时后重启 run_batch 的计划任务
+
+    通过 schtasks 注册一个 ONCE 任务, 6 小时后启动 run_batch.ps1
+    即使电脑睡眠/关机, Windows 计划任务服务也会到点触发 (休眠唤醒)
+
+    如果当前进程没有管理员权限, 用 -Verb RunAs 重新启动一个提权版 PowerShell 来注册
+    """
+    import subprocess
+    task_name = "CebwmRestart6h"
+    main_py = os.path.join(SCRIPT_DIR, "run_batch.ps1")
+    start_time = datetime.now() + timedelta(hours=6)
+    time_str = start_time.strftime("%H:%M")
+    date_str = start_time.strftime("%Y-%m-%d")
+
+    # 写一个状态文件, 记录自动重试时间
+    try:
+        retry_info = {
+            "scheduled_time": start_time.strftime("%Y-%m-%d %H:%M:%S"),
+            "scheduled_at": now_time_str(),
+            "reason": "auto-scheduled due to anti-crawler detection",
+        }
+        retry_path = os.path.join(STATE_DIR, "auto_retry.json")
+        with open(retry_path, "w", encoding="utf-8") as f:
+            json.dump(retry_info, f, ensure_ascii=False, indent=2)
+        print(f"   [AUTO_RETRY] 状态已写入: {retry_path}")
+    except Exception as e:
+        print(f"   [AUTO_RETRY] 写状态失败: {e}")
+
+    # 构造一个临时 PowerShell 脚本去注册任务
+    ps_script = os.path.join(STATE_DIR, "_schedule_6h.ps1")
+    ps_content = f'''chcp 65001 | Out-Null
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$taskName = "{task_name}"
+$mainPy = "{main_py}"
+$timeStr = "{time_str}"
+$dateStr = "{date_str}"
+# 检查管理员
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {{
+    Write-Host "NEED_ADMIN"
+    Start-Process powershell -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$MyInvocation.MyCommand.Path) -Verb RunAs -Wait
+    exit $LASTEXITCODE
+}}
+schtasks /Delete /TN $taskName /F 2>$null | Out-Null
+$tr = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $mainPy + '"'
+$out = schtasks /Create /SC ONCE /TN $taskName /TR $tr /ST $timeStr /SD $dateStr /F 2>&1
+if ($LASTEXITCODE -eq 0) {{
+    Write-Host "TASK_OK: $taskName scheduled at $timeStr $dateStr"
+    exit 0
+}} else {{
+    Write-Host "TASK_FAILED: $out"
+    exit 1
+}}
+'''
+    try:
+        with open(ps_script, "w", encoding="utf-8") as f:
+            f.write(ps_content)
+    except Exception as e:
+        print(f"   [AUTO_RETRY] 写 PS 脚本失败: {e}")
+        return
+
+    # 用提权方式运行 PS 脚本
+    try:
+        # Start-Process -Verb RunAs 会弹 UAC 提示, 用户点"是"即可
+        proc = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps_script],
+            capture_output=True, timeout=30, text=True,
+        )
+        output = (proc.stdout or "") + (proc.stderr or "")
+        if "TASK_OK" in output:
+            print(f"   ✅ 已注册 6h 后重启任务: {task_name} (启动时间: {date_str} {time_str})")
+        elif "NEED_ADMIN" in output:
+            # 用户没点 UAC, 重试一次, 这时 UAC 会弹出来
+            print("   ⚠️ 需要管理员权限, 弹 UAC 提示...")
+            subprocess.run(
+                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                 "-File", ps_script],
+                timeout=60,
+            )
+        else:
+            print(f"   ⚠️ 注册计划任务失败: {output.strip()[:200]}")
+    except Exception as e:
+        print(f"   ⚠️ 注册计划任务异常: {e}")
+    finally:
+        # 清理临时脚本
+        try:
+            os.remove(ps_script)
+        except Exception:
+            pass
 
 SITE_ROOT = "https://www.cebwm.com"
 HOME_URL = SITE_ROOT
@@ -1656,8 +1748,11 @@ class CebwmCrawler:
                 if not self.wait_products_ready():
                     print(f"⚠️ 列表加载失败，准备自动切换浏览器（当前: {self.browser_name}）")
                     if not self.switch_to_next_browser_and_reload(target_url):
-                        print("⚠️ 所有候选浏览器均无法加载列表，跳过该目标")
-                        continue
+                        print("⚠️ 所有候选浏览器均无法加载列表, 判定为风控")
+                        # 退出 main.py (exit=10), run_batch.ps1 收到后会自己注册 6h 后重启
+                        self.close()
+                        emergency_exit("forbidden: 所有浏览器均无法加载产品列表, run_batch 将调度 6h 后重试", EXIT_CODE_BLOCKED)
+                        continue  # 不会执行, 上面 sys.exit 了
 
                 # ============ 分工爬取: 计算本任务负责的页区间 ============
                 total_pages = self.get_product_list_total_pages()
