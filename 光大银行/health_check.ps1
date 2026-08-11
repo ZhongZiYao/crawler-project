@@ -225,8 +225,50 @@ if ($isHealthy) {
         exit 1
     }
 } else {
-    Write-Log 'WARN 网站被风控, 杀掉爬虫, 等下次检查' 'WARN'
+    Write-Log 'WARN 网站被风控, 杀掉爬虫, 注册 6 小时后自动重试' 'WARN'
     Stop-AllCrawlerProcesses
+
+    # 自动注册 6h 后重启 (需要管理员权限, 没有则提权)
+    try {
+        $restartTaskName = 'CebwmRestart6h'
+        $mainPy = Join-Path $scriptDir 'run_batch.ps1'
+        $restartTime = (Get-Date).AddHours(6)
+        $timeStr = $restartTime.ToString('HH:mm')
+        $dateStr = $restartTime.ToString('yyyy-MM-dd')
+        $trTask = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $mainPy + '"'
+
+        $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        if (-not $isAdmin) {
+            # 提权重启注册
+            $tmpScript = Join-Path $StateDir '_register_restart.ps1'
+            $tmpContent = @"
+chcp 65001 | Out-Null
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+schtasks /Delete /TN $restartTaskName /F 2>`$null | Out-Null
+`$out = schtasks /Create /SC ONCE /TN $restartTaskName /TR '$trTask' /ST $timeStr /SD $dateStr /F 2>&1
+if (`$LASTEXITCODE -eq 0) { Write-Host 'TASK_OK' ; exit 0 } else { Write-Host 'TASK_FAILED' ; exit 1 }
+"@
+            $tmpContent | Out-File -FilePath $tmpScript -Encoding UTF8
+            $proc = Start-Process powershell -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$tmpScript`"") -Verb RunAs -Wait -PassThru
+            Remove-Item $tmpScript -Force -ErrorAction SilentlyContinue
+            if ($proc.ExitCode -eq 0) {
+                Write-Log ('已注册 6h 后重启: ' + $restartTaskName + ' -> ' + $restartTime.ToString('yyyy-MM-dd HH:mm')) 'INFO'
+            } else {
+                Write-Log '注册重启任务失败 (UAC 被拒绝)' 'WARN'
+            }
+        } else {
+            schtasks /Delete /TN $restartTaskName /F 2>$null | Out-Null
+            $out = schtasks /Create /SC ONCE /TN $restartTaskName /TR $trTask /ST $timeStr /SD $dateStr /F 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Log ('已注册 6h 后重启: ' + $restartTaskName + ' -> ' + $restartTime.ToString('yyyy-MM-dd HH:mm')) 'INFO'
+            } else {
+                Write-Log '注册重启任务失败' 'WARN'
+            }
+        }
+    } catch {
+        Write-Log ('注册重启任务异常: ' + $_) 'WARN'
+    }
+
     Write-Log '===== 健康检查完成 (异常, 已停止爬虫) =====' 'WARN'
     exit 1
 }
