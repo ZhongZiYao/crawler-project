@@ -76,9 +76,30 @@ CATEGORIES = {
 
 # 栏目开关（新一轮全部打开）
 ENABLE_CATEGORIES = {
-    "产品说明书": True,
+    "产品说明书": False,
     "临时公告": True,
     "定期报告": False,
+}
+
+# 临时公告子栏目过滤：只下载这4个子栏目的公告（按标题关键词匹配）
+# 网站前端也是按标题关键词分类的，API 不支持 belongSecond 参数
+TEMP_NOTICE_SUB_CATEGORIES = {
+    "阶段性费率优惠公告": {
+        # 标题同时含"费率"和"优惠"（兼容"费率 优惠"带空格的情况）
+        "keywords_all": ["费率", "优惠"],
+    },
+    "费率调整公告": {
+        # 标题含"费率调整"
+        "keywords_any": ["费率调整"],
+    },
+    "业绩比较基准调整公告": {
+        # 标题含"业绩比较基准"
+        "keywords_any": ["业绩比较基准"],
+    },
+    "新增份额公告": {
+        # 标题含"增加产品份额"或"增加份额"或"新增份额"或"新设份额"
+        "keywords_any": ["增加产品份额", "增加份额", "新增份额", "新设份额"],
+    },
 }
 
 # 单栏目测试：填栏目名则只跑该栏目，空字符串=按开关执行
@@ -420,6 +441,21 @@ def unescape_html_content(text):
 # 单栏目爬取
 # ============================================================
 
+def match_temp_notice_sub_category(title):
+    """判断临时公告标题是否属于用户要的4个子栏目之一，返回子栏目名或 None"""
+    title = str(title or "")
+    for sub_name, rules in TEMP_NOTICE_SUB_CATEGORIES.items():
+        # keywords_all: 标题必须同时包含所有关键词
+        if "keywords_all" in rules:
+            if all(kw in title for kw in rules["keywords_all"]):
+                return sub_name
+        # keywords_any: 标题包含任一关键词即匹配
+        if "keywords_any" in rules:
+            if any(kw in title for kw in rules["keywords_any"]):
+                return sub_name
+    return None
+
+
 def crawl_category(sess, category, cat_conf, downloaded, file_seen, checkpoint, used_names):
     log("")
     log("=" * 60)
@@ -494,6 +530,11 @@ def crawl_category(sess, category, cat_conf, downloaded, file_seen, checkpoint, 
 
         log(f"  第 {page_no} 页: {len(items)} 条 (总数 {total_num}, begin={begin})")
 
+        # 临时公告：先统计本页匹配4个子栏目的条数
+        if category == "临时公告":
+            matched = sum(1 for it in items if match_temp_notice_sub_category(it.get("title", "")))
+            log(f"    其中 {matched} 条匹配4个子栏目关键词（阶段性费率优惠/费率调整/业绩比较基准/新增份额）")
+
         for idx, item in enumerate(items, 1):
             item_id = str(item.get("id") or "")
             title = str(item.get("title") or "").strip()
@@ -512,6 +553,17 @@ def crawl_category(sess, category, cat_conf, downloaded, file_seen, checkpoint, 
             if not in_date_range(pub_date):
                 skip += 1
                 continue
+
+            # 临时公告子栏目过滤：只下载4个子栏目的公告
+            if category == "临时公告":
+                sub_cat = match_temp_notice_sub_category(title)
+                if not sub_cat:
+                    skip += 1
+                    continue
+                # 记录匹配到的子栏目（用于日志展示）
+                item_sub_cat = sub_cat
+            else:
+                item_sub_cat = category
 
             # Step 1: 详情（失败时等待恢复→长休息→重试一次，仍失败记入并累计连续失败）
             try:
@@ -588,16 +640,16 @@ def crawl_category(sess, category, cat_conf, downloaded, file_seen, checkpoint, 
 
                     if ok:
                         size = os.path.getsize(save_path)
-                        log(f"  [{idx}] ✓ {title[:36]} 附件{fi}/{len(file_list)} ({size:,}B)")
+                        log(f"  [{idx}] ✓ [{item_sub_cat}] {title[:36]} 附件{fi}/{len(file_list)} ({size:,}B)")
                         success += 1
                         item_saved_any = True
                         file_seen.add(f_path)
                         append_downloaded(f"file|{f_path}")
-                        append_log([ORG_NAME, title, category, pub_date, now_str(),
+                        append_log([ORG_NAME, title, item_sub_cat, pub_date, now_str(),
                                     "SUCCEED", real_url, save_path,
                                     f"{ORG_NAME}+{category}+{item_id}+{fi}"])
                     else:
-                        log(f"  [{idx}] ✗ {title[:36]} 附件{fi} 下载失败: {err}")
+                        log(f"  [{idx}] ✗ [{item_sub_cat}] {title[:36]} 附件{fi} 下载失败: {err}")
                         fail += 1
                         fail_streak += 1
                         item_ok = False
