@@ -56,7 +56,7 @@ LIST_PAGE_SIZE = 20
 # TODO[手动修改]: 运行控制（None 表示全量）
 MAX_PAGES = None
 LIMIT = None
-SHOW_BROWSER = False
+SHOW_BROWSER = True
 RETRY_FAILED_ONLY = False
 SKIP_COLLECT = False
 
@@ -156,8 +156,16 @@ def _normalize(text: str) -> str:
 
 
 def is_in_date_range(disclose_date: str):
-    """返回 (是否在区间内, 是否过早可早停)"""
+    """返回 (是否在区间内, 是否过早可早停)
+    如果日期为空或无法解析，视为在范围内（不跳过）"""
+    raw = str(disclose_date or "").strip()
+    # 如果日期为空，视为在范围内
+    if not raw:
+        return True, False
     d = normalize_date(disclose_date)
+    # 如果 normalize_date 返回今天（说明无法解析），也视为在范围内
+    if d == today_str() and not re.search(r"\d{4}", raw):
+        return True, False
     upper = (END_DATE.strip() if END_DATE and END_DATE.strip()
              else datetime.now().strftime("%Y-%m-%d"))
     if START_DATE and d < START_DATE:
@@ -604,56 +612,163 @@ def request_getebank_page(
     raise RuntimeError(f"分页请求失败: page={page_no} | {last_err}")
 
 
-def collect_records_from_api(
+def collect_records_from_browser(
     session: requests.Session,
     browser: Optional[ChromiumPage],
     max_pages: Optional[int],
 ) -> List[Dict[str, str]]:
-    print("📚 开始通过 getEBank 接口采集产品说明书链接...")
+    """通过浏览器渲染页面后从 DOM 提取产品说明书链接（支持分页）"""
+    if browser is None:
+        raise RuntimeError("浏览器未启动，无法进行 DOM 采集")
+
+    print("📚 开始通过浏览器 DOM 采集产品说明书链接...")
     records: List[Dict[str, str]] = []
     seen: Set[Tuple[str, str]] = set()
 
-    first = request_getebank_page(session, browser, page_no=1, page_size=LIST_PAGE_SIZE)
-    first_list = first.get("data") or []
-    page_info = first.get("page") or {}
-    total_count = int(page_info.get("totalCount") or len(first_list) or 0)
-    total_pages = max(1, (total_count + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE)
+    # 导航到理财产品页面
+    print(f"   🌐 正在加载页面：{LC_URL}")
+    browser.get(LC_URL)
+    time.sleep(8)
+
+    def extract_products_from_page(page_no: int):
+        """从当前页面提取产品数据"""
+        table_rows = browser.eles('css:.lc-table tbody tr')
+        print(f"   📊 第{page_no}页：找到 {len(table_rows)} 行产品数据")
+
+        for row_idx, row in enumerate(table_rows, 1):
+            try:
+                cells = row.eles('tag:td')
+                if len(cells) < 7:
+                    continue
+
+                product_name = cells[0].text.strip()
+                term = cells[3].text.strip()
+                min_amount = cells[4].text.strip()
+                risk = cells[5].text.strip()
+
+                link_elem = cells[6].ele('tag:a')
+                if not link_elem:
+                    continue
+                href = link_elem.attr('href') or ''
+                if 'filePreview' not in href:
+                    continue
+
+                code_match = re.search(r'filePreview/([^/?]+)', href)
+                product_code = code_match.group(1) if code_match else ''
+
+                manual_url = urljoin(BASE_URL, href) if not href.startswith('http') else href
+                key = (product_code or product_name, manual_url)
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                records.append({
+                    'product_name': product_name or product_code or f'unknown_{row_idx}',
+                    'product_code': product_code,
+                    'manual_url': manual_url,
+                    'source_page': str(page_no),
+                    'disclose_date': '',
+                    'term': term,
+                    'min_amount': min_amount,
+                    'risk': risk,
+                })
+            except Exception as e:
+                print(f"   ⚠️ 第{page_no}页第{row_idx}行解析失败：{e}")
+                continue
+
+    # 提取第一页
+    extract_products_from_page(1)
+
+    # 检测分页信息（仅用于日志输出，实际翻页靠"下一页"按钮逐页推进）
+    total_pages = 1
+    try:
+        all_page_div = browser.ele('#all-page')
+        if all_page_div:
+            info_text = all_page_div.text
+            import re as _re
+            total_match = _re.search(r'共\s*(\d+)\s*条', info_text)
+            if total_match:
+                total_count = int(total_match.group(1))
+                actual_rows = len(browser.eles('css:.lc-table tbody tr'))
+                if actual_rows > 0:
+                    total_pages = (total_count + actual_rows - 1) // actual_rows
+                    print(f"    📊 共{total_count}条，每页约{actual_rows}行，预计{total_pages}页")
+                else:
+                    print(f"    📊 共{total_count}条，但无法确定每页行数")
+            # 也尝试从 data-page 取最大页码作为参考
+            js_max_page = """
+                var links = document.querySelectorAll('#all-page a[data-page]');
+                var maxPage = 1;
+                for (var i = 0; i < links.length; i++) {
+                    var p = parseInt(links[i].getAttribute('data-page'));
+                    if (p > maxPage) maxPage = p;
+                }
+                return maxPage;
+            """
+            max_page_from_dom = browser.run_js(js_max_page)
+            if max_page_from_dom and int(max_page_from_dom) > total_pages:
+                total_pages = int(max_page_from_dom)
+                print(f"    ✅ 从分页控件修正为 {total_pages} 页")
+    except Exception as e:
+        print(f"   ⚠️ 分页检测失败：{e}")
 
     if max_pages is not None:
         total_pages = min(total_pages, max_pages)
 
-    def consume_page(items: List[Dict], page_no: int):
-        for item in items:
-            product_name = str(item.get("prdctNme") or "").strip()
-            product_code = str(item.get("prdctCd") or "").strip()
-            show_url = str(item.get("showUrl") or "").strip()
-            start_dt = normalize_date(str(item.get("startDt") or ""))
-            if not show_url:
-                continue
-            manual_url = urljoin(BASE_URL, show_url)
-            key = (product_code or product_name, manual_url)
-            if key in seen:
-                continue
-            seen.add(key)
-            records.append(
-                {
-                    "product_name": product_name or product_code or "unknown_product",
-                    "product_code": product_code,
-                    "manual_url": manual_url,
-                    "source_page": str(page_no),
-                    "disclose_date": start_dt,
+    # 遍历后续页面 —— 始终使用"下一页"按钮，避免页码被省略号截断导致点不到
+    page_no = 2
+    consecutive_fail = 0
+    while True:
+        if max_pages is not None and page_no > total_pages:
+            break
+
+        try:
+            print(f"   🔄 翻到第{page_no}页...")
+
+            # 检查"下一页"按钮是否已禁用（到达末页）
+            is_last_js = """
+                var nextBtn = document.querySelector('#all-page .layui-laypage-next');
+                if (!nextBtn) return 'no_btn';
+                if (nextBtn.classList.contains('layui-disabled')) return 'disabled';
+                return 'ok';
+            """
+            next_state = browser.run_js(is_last_js)
+
+            if next_state == 'no_btn':
+                print(f"   ℹ️ 未找到下一页按钮，已到最后一页")
+                break
+            if next_state == 'disabled':
+                print(f"   ℹ️ 下一页按钮已禁用，已到最后一页")
+                break
+
+            # 点击"下一页"
+            js_next = """
+                var nextBtn = document.querySelector('#all-page .layui-laypage-next');
+                if (nextBtn && !nextBtn.classList.contains('layui-disabled')) {
+                    nextBtn.click();
+                    return true;
                 }
-            )
+                return false;
+            """
+            result = browser.run_js(js_next)
+            if result:
+                time.sleep(3)
+                extract_products_from_page(page_no)
+                consecutive_fail = 0
+                page_no += 1
+            else:
+                consecutive_fail += 1
+                if consecutive_fail >= 2:
+                    print(f"   ⚠️ 连续{consecutive_fail}次翻页失败，停止")
+                    break
+                print(f"   ⚠️ 第{page_no}页点击失败，重试...")
+                time.sleep(2)
 
-    consume_page(first_list, page_no=1)
-    print(f"   ✅ 第1页完成，累计链接 {len(records)}")
+        except Exception as e:
+            print(f"   ⚠️ 第{page_no}页翻失败：{e}")
+            break
 
-    for page_no in range(2, total_pages + 1):
-        data = request_getebank_page(session, browser, page_no=page_no, page_size=LIST_PAGE_SIZE)
-        consume_page(data.get("data") or [], page_no=page_no)
-        print(f"   ✅ 第{page_no}页完成，累计链接 {len(records)}")
-
-    print(f"📦 接口采集结束，共 {len(records)} 条说明书链接")
+    print(f"📦 浏览器 DOM 采集结束，共 {len(records)} 条说明书链接")
     return records
 
 
@@ -826,13 +941,15 @@ def download_records(
         product_code = str(rec.get("product_code") or "").strip()
         source_link = str(rec.get("manual_url") or "").strip()
         source_page = int(str(rec.get("source_page") or "0") or 0)
-        disclose_date = normalize_date(str(rec.get("disclose_date") or ""))
+        raw_disclose_date = str(rec.get("disclose_date") or "").strip()
+        disclose_date = normalize_date(raw_disclose_date) if raw_disclose_date else ""
 
         _in_range, _too_old = is_in_date_range(disclose_date)
         if not _in_range:
             stats["skip"] += 1
+            date_display = disclose_date if disclose_date else "(未知)"
             if _too_old:
-                print(f"   ⏭️ [日期跳过] {product_name} 披露日期 {disclose_date} < {START_DATE}")
+                print(f"   ⏭️ [日期跳过] {product_name} 披露日期 {date_display} < {START_DATE}")
                 if EARLY_STOP:
                     print(f"   ⏹️ [早停] 检测到早于起始日期 {START_DATE} 的条目，停止翻页")
                     if ENABLE_CHECKPOINT_RESUME and not retry_failed_only:
@@ -840,7 +957,7 @@ def download_records(
                         save_checkpoint(checkpoint)
                     break
             else:
-                print(f"   ⏭️ [日期跳过] {product_name} 披露日期 {disclose_date} > {END_DATE or '今天'}")
+                print(f"   ⏭️ [日期跳过] {product_name} 披露日期 {date_display} > {END_DATE or '今天'}")
             if ENABLE_CHECKPOINT_RESUME and not retry_failed_only:
                 checkpoint["download"] = {"next_index": idx + 1}
                 save_checkpoint(checkpoint)
@@ -1013,7 +1130,7 @@ def main():
             records = load_records_from_json()
             print(f"   ✅ 读取历史链接 {len(records)} 条")
         else:
-            records = collect_records_from_api(
+            records = collect_records_from_browser(
                 session=session,
                 browser=browser,
                 max_pages=MAX_PAGES,
