@@ -105,9 +105,16 @@ except Exception:
     START_DATE = "2024-01-01"
     END_DATE   = ""
     EARLY_STOP = False
+
+# 中原银行的披露日期写在详情页 meta 里，肉眼看不到，所以用户靠 PROJECT_END_DATE 挡不住
+# “今天披露的新产品”。当全局 END_DATE 已经早于今天时，自动把 END_DATE 顺延到今天，
+# 保证“今天披露的产品”能正常进入下载流程；用户手动设置的 END_DATE 不受此影响。
+_today = datetime.now().strftime("%Y-%m-%d")
+if END_DATE and END_DATE < _today:
+    END_DATE = _today
 # 本地覆盖示例（取消注释即生效）：
-START_DATE = "2026-07-01"
-END_DATE   = "2026-08-07"
+# START_DATE = "2026-07-01"
+# END_DATE   = "2026-08-07"
 
 USER_AGENTS = [
     (
@@ -166,8 +173,16 @@ def _normalize(text: str) -> str:
 
 
 def is_in_date_range(disclose_date: str):
-    """返回 (是否在区间内, 是否过早可早停)"""
-    d = normalize_date(disclose_date)
+    """返回 (是否在区间内, 是否过早可早停)
+    中原银行详情页可能不携带披露日期；空字符串视为“未知披露日期”，直接放行，
+    不参与区间判断，也不触发早停（避免反复跳过同类无日期产品）。"""
+    raw = str(disclose_date or "").strip()
+    if not raw:
+        return True, False
+    d = normalize_date(raw)
+    # normalize_date 在无法解析时仍会回退到 today_str()，这里再做一次防御性判断
+    if not d:
+        return True, False
     upper = (END_DATE.strip() if END_DATE and END_DATE.strip()
              else datetime.now().strftime("%Y-%m-%d"))
     if START_DATE and d < START_DATE:
@@ -179,7 +194,9 @@ def is_in_date_range(disclose_date: str):
 
 def build_unique_key(institute_name: str, notice_type: str, title: str, disclose_date: str) -> str:
     # TODO[手动修改]: 如需调整 unique_key 规则，在此函数统一修改
-    return f"{institute_name}+{notice_type}+{sanitize_text(title, 300)}+{disclose_date}"
+    # 缺日期时使用 “未知日期” 占位，保证 unique_key 仍有区分度
+    date_token = str(disclose_date or "").strip() or "未知日期"
+    return f"{institute_name}+{notice_type}+{sanitize_text(title, 300)}+{date_token}"
 
 
 def build_base_filename(
@@ -190,7 +207,9 @@ def build_base_filename(
     disclose_date: str,
 ) -> str:
     # 要求: 机构名+产品名+公告类型+销售代码(可空)+披露日期
-    date_token = re.sub(r"[^0-9]", "", disclose_date)
+    # 中原银行详情页可能不带披露日期：空日期用 “未知日期” 占位，避免文件名末尾出现孤立下划线。
+    date_raw = str(disclose_date or "").strip()
+    date_token = re.sub(r"[^0-9]", "", date_raw) or ("未知日期" if not date_raw else date_raw)
     parts = [
         sanitize_text(institute_name, 80),
         sanitize_text(product_name, 160),
@@ -247,7 +266,7 @@ def write_log_row(
         institute_name,
         sanitize_text(notice_title, 300),
         notice_type,
-        normalize_date(disclose_date),
+        (normalize_date(disclose_date) if str(disclose_date or "").strip() else ""),
         now_time_str(),
         status,
         source_link,
@@ -620,6 +639,8 @@ def parse_detail_codes_and_date(html: str) -> Dict[str, str]:
         codeshou = m2.group(1).strip()
 
     # 页面中常见: <meta name="createDate" content="2026-03-29 17:22:28"/>
+    # 注: 中原银行详情页未必携带 createDate 元信息；缺日期视为“未知披露日期”，
+    # 不再用 today_str() 兜底，避免项目 END_DATE < 今天时误跳过。
     m3 = re.search(r'<meta\s+name="createDate"\s+content="([^"]+)"', html)
     if m3:
         create_date = normalize_date(m3.group(1))
@@ -627,7 +648,7 @@ def parse_detail_codes_and_date(html: str) -> Dict[str, str]:
     return {
         "codesqian": codesqian,
         "codeshou": codeshou,
-        "disclose_date": create_date or today_str(),
+        "disclose_date": create_date,  # 空字符串表示未知披露日期 → 直接放行下载
     }
 
 
@@ -815,12 +836,17 @@ def download_one_book(
     downloaded_fingerprints: Set[str],
     record_failed_task: bool = True,
 ) -> str:
-    disclose_date = normalize_date(disclose_date)
-    _in_range, _too_old = is_in_date_range(disclose_date)
-    if not _in_range:
-        tag = "过早(早停)" if _too_old else "过晚"
-        print(f"   ⏭️ [日期跳过] 披露日期 {disclose_date} {tag} 区间[{START_DATE}~{END_DATE or '今天'}]: {announce_title}")
-        return "too_old" if _too_old else "skip"
+    raw_date = str(disclose_date or "").strip()
+    if not raw_date:
+        # 缺日期 → 放行下载（用户要求）
+        print(f"   🟡 [无披露日期] {announce_title} 缺日期直接放行下载")
+    else:
+        disclose_date = normalize_date(raw_date)
+        _in_range, _too_old = is_in_date_range(disclose_date)
+        if not _in_range:
+            tag = "过早(早停)" if _too_old else "过晚"
+            print(f"   ⏭️ [日期跳过] 披露日期 {disclose_date} {tag} 区间[{START_DATE}~{END_DATE or '今天'}]: {announce_title}")
+            return "too_old" if _too_old else "skip"
 
     base_name = build_base_filename(
         institute_name=INSTITUTE_NAME,
@@ -1085,18 +1111,25 @@ def process_product(
     codesqian = parsed["codesqian"]
     codeshou = parsed["codeshou"]
     disclose_date = parsed["disclose_date"]
+    date_text = str(disclose_date or "").strip()
 
-    _in_range, _too_old = is_in_date_range(disclose_date)
-    if not _in_range:
-        counters["skipped"] += 1
-        if _too_old:
-            print(f"    ⏭️ [日期跳过] {product_name} 披露日期 {disclose_date} < {START_DATE}")
-            if EARLY_STOP:
-                print(f"    ⏹️ [早停] 检测到早于起始日期 {START_DATE} 的条目，停止翻页")
-                counters["early_stop"] = 1
-        else:
-            print(f"    ⏭️ [日期跳过] {product_name} 披露日期 {disclose_date} > {END_DATE or '今天'}")
-        return False
+    # 披露日期存在 → 按 [START_DATE, END_DATE] 区间过滤；不在范围内直接跳过。
+    # 披露日期缺失 → 视为“未知披露日期”，放行下载（用户要求）。
+    if date_text:
+        _in_range, _too_old = is_in_date_range(date_text)
+        if not _in_range:
+            counters["skipped"] += 1
+            if _too_old:
+                print(f"    ⏭️ [日期跳过] {product_name} 披露日期 {date_text} < {START_DATE}")
+                if EARLY_STOP:
+                    print(f"    ⏹️ [早停] 检测到早于起始日期 {START_DATE} 的条目，停止翻页")
+                    counters["early_stop"] = 1
+            else:
+                print(f"    ⏭️ [日期跳过] {product_name} 披露日期 {date_text} > {END_DATE or '今天'}")
+            return False
+        print(f"    📅 披露日期: {date_text}（在区间内）")
+    else:
+        print(f"    🟡 [无披露日期] {product_name} 详情页未携带日期，直接下载")
 
     sales_code = codesqian or codeshou or ""
     candidates = build_book_candidates(codesqian, codeshou)
