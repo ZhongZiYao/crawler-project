@@ -53,7 +53,7 @@ NOTICE_API = (
 )
 
 # TODO[手动修改]: 是否只跑单个板块，可选: "鑫意理财" / "代销理财" / ""
-RUN_ONLY_BOARD = ""
+RUN_ONLY_BOARD = "鑫意理财"
 
 # TODO[手动修改]: 是否只跑单个产品代码，空字符串表示全量
 TEST_ONLY_PRODUCT_CODE = ""

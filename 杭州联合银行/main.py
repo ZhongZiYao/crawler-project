@@ -95,7 +95,7 @@ CATEGORY_PAGE_TOKENS = {
 TEST_ONLY_DETAIL_URL = ""
 
 # TODO[手动修改]: 单模块测试（可填: clgg / dqgg / yzgg / lsgg），空列表表示全跑
-RUN_ONLY_CATEGORIES: List[str] = []
+RUN_ONLY_CATEGORIES: List[str] = ["clgg"]
 
 # TODO[手动修改]: 重试与等待
 REQUEST_TIMEOUT = 45

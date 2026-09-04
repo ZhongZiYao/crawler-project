@@ -25,11 +25,11 @@ from datetime import datetime
 TARGETS = [
     # (栏目名, URL, 起始序号, 终止序号)
     # 以下栏目已按需求关闭，如需恢复去掉行首 # 即可
-    ("发行公告", "https://www.bqd-wm.com/eportal/ui?pageId=71b994290ccb49cbbc6bdcfda2ca5d4c", 1, 300),
+    ("发行公告", "https://www.bqd-wm.com/eportal/ui?pageId=71b994290ccb49cbbc6bdcfda2ca5d4c", 1, None),
     # ("到期公告", "https://www.bqd-wm.com/eportal/ui?pageId=99cf7abe92124bfaa635ee3ea5f43787", 1, 3),
     # ("净值公告", "https://www.bqd-wm.com/eportal/ui?pageId=6f40cd057ed648ceaf2a1f523db30298", 1, 3),
     # ("定期公告", "https://www.bqd-wm.com/eportal/ui?pageId=c4474374201c475ab1b54121a62f9e23", 1, 3),
-    ("其他公告", "https://www.bqd-wm.com/eportal/ui?pageId=30b9f1566b9541ce8d14e9456d6f505d", 1, 300),
+    ("其他公告", "https://www.bqd-wm.com/eportal/ui?pageId=30b9f1566b9541ce8d14e9456d6f505d", 1, None),
     # 发售公告：列表为详情页链接（/qylc/xxpl/fsgg/...index.html），需进详情页再取 PDF 附件
     # ("发售公告", "https://www.bqd-wm.com/eportal/ui?pageId=d744d0fa9ee14e6e837c15f191fb0aaa", 1, None),
 ]

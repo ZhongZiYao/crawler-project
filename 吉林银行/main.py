@@ -73,7 +73,7 @@ CHART_TYPE_NAME_MAP = {
 
 # TODO[手动修改]: 选项卡控制，可选 chartType: "1" / "2" 1-吉行理财 2-代销理财
 # 默认全跑两类产品，若只跑单个可填 RUN_ONLY_CHART_TYPE
-RUN_ONLY_CHART_TYPE = ""
+RUN_ONLY_CHART_TYPE = "1"
 CHART_TYPES_TO_RUN = ["1", "2"]
 
 # TODO[手动修改]: 联调模式，仅抓单个产品 articleKey（空字符串为全量）

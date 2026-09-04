@@ -84,7 +84,7 @@ CATEGORY_MAP = {
 }
 
 # 抓取哪些分类（逗号分隔，默认全抓）
-CATEGORY_CODES = "issuReport,perReport,tempInfoDisclosure,expireNotice,companyNotice"
+CATEGORY_CODES = "issuReport,perReport,tempInfoDisclosure"
 
 # 单独抓取的情况
 # CATEGORY_CODES = "issuReport"

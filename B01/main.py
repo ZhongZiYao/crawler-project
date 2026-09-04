@@ -47,11 +47,11 @@ HOME_URL = "https://www.cmbchinawm.com/"  # 【需手动修改】首页
 NOTICE_URL = "https://www.cmbchinawm.com/notice"  # 【需手动修改】目标页
 
 # 只抓以下 6 个公告模块（按你的要求）
-ENABLE_NOTICE_ISSUE = True             # 发行公告
+ENABLE_NOTICE_ISSUE = False             # 发行公告
 ENABLE_NOTICE_PERIODIC_REPORT = True   # 定期报告
-ENABLE_NOTICE_MATURITY = True          # 到期公告
+ENABLE_NOTICE_MATURITY = False          # 到期公告
 ENABLE_NOTICE_SPEC = True              # 产品说明书
-ENABLE_NOTICE_AGREEMENT = True         # 产品相关协议
+ENABLE_NOTICE_AGREEMENT = False         # 产品相关协议
 ENABLE_NOTICE_OTHER = True            # 其他产品公告
 
 # 仅测试单个模块时填写名称（为空表示按上方6个开关组合执行）

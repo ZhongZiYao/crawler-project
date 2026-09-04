@@ -86,7 +86,7 @@ CATEGORY_MAP = {
     },
 }
 # 默认抓取全部
-CATEGORY_CODES = "product_notice,specification,net_worth,periodic_report,other_notice"
+CATEGORY_CODES = "specification"
 
 # 需要抓取哪个就取消注释即可
 # CATEGORY_CODES = "product_notice"             #产品公告

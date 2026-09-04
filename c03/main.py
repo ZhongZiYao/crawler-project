@@ -30,9 +30,9 @@ PDF_TARGETS = [
     # 以下栏目已按需求关闭，如需恢复去掉行首 # 即可
     # ("公募_产品销售文件", "https://www.nanyinwealth.com/nanyinwealth/xxpl/cpgg--cpxswj/cpxswj/index.html", "gm", 5, 7),
     # ("公募_运作公告", "https://www.nanyinwealth.com/nanyinwealth/xxpl/cpgg--cpxswj/yxgg/index.html", "gm", 5, 7),
-    ("公募_发行公告", "https://www.nanyinwealth.com/nanyinwealth/xxpl/cpgg--cpxswj/fxgg/index.html", "gm", 1, 5),
+    ("公募_发行公告", "https://www.nanyinwealth.com/nanyinwealth/xxpl/cpgg--cpxswj/fxgg/index.html", "gm", 1, None),
     # ("公募_到期公告", "https://www.nanyinwealth.com/nanyinwealth/xxpl/cpgg--cpxswj/dqgg/index.html", "gm", 1, 2),
-    ("公募_临时公告", "https://www.nanyinwealth.com/nanyinwealth/xxpl/cpgg--cpxswj/lsgg/index.html", "gm", 1, 7),
+    ("公募_临时公告", "https://www.nanyinwealth.com/nanyinwealth/xxpl/cpgg--cpxswj/lsgg/index.html", "gm", 1, None),
     # ("公募_其他公告", "https://www.nanyinwealth.com/nanyinwealth/xxpl/cpgg--cpxswj/qtgg/index.html", "gm", 1, 2),
     # ("公募_定期报告", "https://www.nanyinwealth.com/nanyinwealth/xxpl/cpgg--cpxswj/dqbg/index.html", "gm", 1, 2),
     # ("公司公告_其他公告", "https://www.nanyinwealth.com/nanyinwealth/xxpl/gsgg/qtgg/index.html", "static_req", 1, 2),

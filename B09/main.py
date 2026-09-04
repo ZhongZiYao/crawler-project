@@ -76,7 +76,7 @@ CATEGORIES = {
 
 # 栏目开关（新一轮全部打开）
 ENABLE_CATEGORIES = {
-    "产品说明书": False,
+    "产品说明书": True,
     "临时公告": True,
     "定期报告": False,
 }
@@ -120,8 +120,8 @@ PAGE_INTERVAL = (6.0, 10.0)     # 翻页间隔（秒）
 API_WAIT_MAX_SECONDS = 300      # API 不可达时最长等待秒数
 
 # 风控规避：分批下载 + 批间长休息 + 连续失败长冷却（参考 2026-07 成功经验）
-BATCH_SIZE = 15                 # 每处理 N 条详情后长休息一次（0=不分批）
-BATCH_PAUSE = (180, 300)        # 批间休息时长（秒）
+BATCH_SIZE = 30                 # 每处理 N 条详情后长休息一次（0=不分批）
+BATCH_PAUSE = (120, 230)        # 批间休息时长（秒）
 FAIL_STREAK_LIMIT = 5           # 连续失败 N 条视为疑似触发风控
 FAIL_STREAK_PAUSE = (300, 480)  # 疑似风控后的长冷却（秒）
 

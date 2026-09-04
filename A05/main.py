@@ -55,13 +55,13 @@ API_BASE = "https://www.bocommwm.cn/SITE"
 # 公告分类映射（与站点前端 switchDisType 一致）
 # 2026-07-23: 开关全开, 按 5.txt 规则后筛
 ANNOUNCEMENT_TYPES = {
-    "0": "成立公告",
+    # "0": "成立公告",
     "1": "业绩公告",
     "2": "定期公告",
     "3": "临时公告",
     "4": "重大事项公告",
-    "5": "法律文本",
-    "6": "到期公告",
+    # "5": "法律文本",
+    # "6": "到期公告",
 }
 
 # 下载与日志
@@ -132,8 +132,8 @@ except Exception:
             from datetime import datetime as _dt
             return _dt.now().strftime('%Y-%m-%d %H:%M:%S')
 # 本地覆盖示例（取消注释即生效）：
-# START_DATE = "2026-03-30"
-# END_DATE   = "2026-06-30"
+# START_DATE = "2026-03-01"
+# END_DATE   = "2026-04-10"
 
 
 def ensure_dir(path: str):

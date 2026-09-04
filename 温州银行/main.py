@@ -71,7 +71,7 @@ MENU_MAP = {
 }
 
 # TODO[手动修改]: 空字符串表示全量抓取全部栏目
-RUN_ONLY_MENU_NAME = "产品说明书,发行(成立)公告,到期(运行)公告,定期公告"
+RUN_ONLY_MENU_NAME = "产品说明书"
 
 # TODO[手动修改]: 单页联调（仅抓某栏目某页）
 TEST_MODE = False
