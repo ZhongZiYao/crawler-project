@@ -64,7 +64,7 @@ CATEGORY_MAP = {
 }
 # 
 # 抓取哪些分类（逗号分隔，默认全抓）
-CATEGORY_CODES = "fxgg,cxqgg,dqgg"
+CATEGORY_CODES = "fxgg"
 
 # 连续空页阈值：达到后停止该分类
 MAX_CONSECUTIVE_EMPTY = 3
